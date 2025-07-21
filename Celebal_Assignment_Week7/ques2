@@ -1,0 +1,101 @@
+--Let's suppose you have 3 different types of file 1) CUST_MSTR_20191112.csv 2) master_child_export-20191112.csv 3) H_ECOM_ORDER.csv All these files will be in the data lake container You have to fetch all three types of files into their respective folders. Note: There could be multiple files on all 3 types for different dates for example CUST_MSTR_20191112.csv and CUST_MSTR_20191113.csv 1) For the "CUST_MSTR" starting name of the file You have to create an additional column for a date that will fetch the data value from the filename and put it into an additional column Date format: 2019-11-12 and load it into the "CUST_MSTR" table 2) For the "master_child_export" starting name of the file You have to create two additional columns date and date key which will fetch the data from the filename and put it into the additional columns. Date format: 2019-11-12 DateKey format: 20191112 and load it into the "master_child" table 3) for the "H_ECOM_ORDER" type of file you have to load it into the database as it is. and load it into "H_ECOM_Orders" table Note: This process will work on truncate load on a daily basis--
+
+--Project Structure--
+csv_data_pipeline/
+├── data_loader.py
+├── config.py
+├── utils.py
+├── requirements.txt
+├── README.md
+└── .gitignore
+
+--config.py – Configuration--
+# config.py
+
+DATABASE_CONFIG = {
+    'host': 'localhost',
+    'port': 5432,
+    'database': 'your_db',
+    'user': 'your_user',
+    'password': 'your_password'
+}
+
+DATA_LAKE_PATH = '/path/to/data_lake'  # Example: './data_lake'
+PROCESSED_PATH = './processed'         # Where files will be moved after processing
+
+--utils.py – Common Helpers--
+# utils.py
+
+import os
+from datetime import datetime
+
+def extract_date_from_filename(filename: str) -> datetime:
+    """Extracts date from filename."""
+    digits = ''.join(filter(str.isdigit, filename))
+    return datetime.strptime(digits, "%Y%m%d")
+
+def move_file_to_folder(src_path, dest_folder):
+    os.makedirs(dest_folder, exist_ok=True)
+    dest_path = os.path.join(dest_folder, os.path.basename(src_path))
+    os.rename(src_path, dest_path)
+
+--data_loader.py – Main Logic--
+# data_loader.py
+
+import os
+import pandas as pd
+import psycopg2
+from config import DATABASE_CONFIG, DATA_LAKE_PATH, PROCESSED_PATH
+from utils import extract_date_from_filename, move_file_to_folder
+
+def connect_to_db():
+    return psycopg2.connect(**DATABASE_CONFIG)
+
+def truncate_and_insert(df, table_name, conn):
+    with conn.cursor() as cur:
+        cur.execute(f"TRUNCATE TABLE {table_name}")
+        conn.commit()
+        cols = ','.join(df.columns)
+        placeholders = ','.join(['%s'] * len(df.columns))
+        insert_query = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders})"
+        cur.executemany(insert_query, df.values.tolist())
+        conn.commit()
+
+def process_file(filepath, conn):
+    filename = os.path.basename(filepath)
+    if filename.startswith("CUST_MSTR_") and filename.endswith(".csv"):
+        df = pd.read_csv(filepath)
+        date_val = extract_date_from_filename(filename)
+        df['file_date'] = date_val.strftime('%Y-%m-%d')
+        truncate_and_insert(df, 'CUST_MSTR', conn)
+        move_file_to_folder(filepath, os.path.join(PROCESSED_PATH, 'CUST_MSTR'))
+
+    elif filename.startswith("master_child_export-") and filename.endswith(".csv"):
+        df = pd.read_csv(filepath)
+        date_val = extract_date_from_filename(filename)
+        df['file_date'] = date_val.strftime('%Y-%m-%d')
+        df['file_date_key'] = date_val.strftime('%Y%m%d')
+        truncate_and_insert(df, 'master_child', conn)
+        move_file_to_folder(filepath, os.path.join(PROCESSED_PATH, 'master_child'))
+
+    elif filename.startswith("H_ECOM_ORDER") and filename.endswith(".csv"):
+        df = pd.read_csv(filepath)
+        truncate_and_insert(df, 'H_ECOM_Orders', conn)
+        move_file_to_folder(filepath, os.path.join(PROCESSED_PATH, 'H_ECOM_ORDER'))
+
+def process_all_files():
+    conn = connect_to_db()
+    for file in os.listdir(DATA_LAKE_PATH):
+        if file.endswith(".csv"):
+            full_path = os.path.join(DATA_LAKE_PATH, file)
+            process_file(full_path, conn)
+    conn.close()
+
+if __name__ == "__main__":
+    process_all_files()
+
+--Folder Output--
+/processed/
+├── CUST_MSTR/
+├── master_child/
+└── H_ECOM_ORDER/
